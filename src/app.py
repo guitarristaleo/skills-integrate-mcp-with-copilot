@@ -5,11 +5,16 @@ A super simple FastAPI application that allows students to view and sign up
 for extracurricular activities at Mergington High School.
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 import os
 from pathlib import Path
+import hmac
+import hashlib
+import uuid
+from typing import Optional
+from urllib.parse import urlencode
 
 app = FastAPI(title="Mergington High School API",
               description="API for viewing and signing up for extracurricular activities")
@@ -130,3 +135,48 @@ def unregister_from_activity(activity_name: str, email: str):
     # Remove student
     activity["participants"].remove(email)
     return {"message": f"Unregistered {email} from {activity_name}"}
+
+
+@app.post("/payments/initiate")
+def initiate_payment(amount: float, description: Optional[str] = None, currency: str = "USD"):
+    """Generate signed parameters for a CyberSource hosted checkout (example/demo).
+
+    In a real implementation you must use the official signing algorithm and
+    keep secrets out of source control. This endpoint returns a `checkout_url`
+    and a `params` object containing a HMAC signature for demo/testing.
+    """
+    secret = os.getenv("CYBERSOURCE_SHARED_SECRET", "test_shared_secret")
+    params = {
+        "access_key": os.getenv("CYBERSOURCE_ACCESS_KEY", "test_access_key"),
+        "profile_id": os.getenv("CYBERSOURCE_PROFILE_ID", "test_profile"),
+        "transaction_uuid": str(uuid.uuid4()),
+        "amount": f"{amount:.2f}",
+        "currency": currency,
+        "description": description or "",
+    }
+
+    # Simple deterministic serialization for signing (demo only)
+    signed_string = urlencode(sorted(params.items()))
+    signature = hmac.new(secret.encode(), signed_string.encode(), hashlib.sha256).hexdigest()
+    params["signature"] = signature
+
+    return {"checkout_url": "https://secureacceptance.cybersource.com/pay", "params": params}
+
+
+@app.post("/payments/webhook")
+async def payments_webhook(request: Request):
+    """Receive CyberSource webhook callbacks and verify signature (demo).
+
+    Expects the sender to include an `X-Cybersource-Signature` header which is
+    an HMAC-SHA256 of the request body using `CYBERSOURCE_SHARED_SECRET`.
+    """
+    secret = os.getenv("CYBERSOURCE_SHARED_SECRET", "test_shared_secret")
+    body = await request.body()
+    signature_header = request.headers.get("X-Cybersource-Signature", "")
+    computed = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+    if not hmac.compare_digest(computed, signature_header):
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # TODO: validate payload, update tickets/orders, and respond accordingly.
+    return {"status": "ok"}
